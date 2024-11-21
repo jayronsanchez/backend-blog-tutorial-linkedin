@@ -16,6 +16,7 @@ const url = `https://${keyVaultName}.vault.azure.net`;
 const credential = new ClientSecretCredential(
   process.env.AZURE_TENANT_ID,
   process.env.AZURE_CLIENT_ID,
+  // client secret expires every 6 months
   process.env.AZURE_CLIENT_SECRET
 );
 const client = new SecretClient(url, credential);
