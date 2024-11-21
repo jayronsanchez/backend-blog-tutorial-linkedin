@@ -1,9 +1,36 @@
 import express from "express";
 import { db, connectToDb } from "./db.js";
+import { ClientSecretCredential } from "@azure/identity";
+import { SecretClient } from "@azure/keyvault-secrets";
+import dotenv from "dotenv";
 
+dotenv.config();
 const app = express();
 // parse request body to json
 app.use(express.json());
+
+// Provide Tenant ID, Client ID and Client Secret of the Registered Application in Azure (Service Principal)
+// Make sure that the Registered Application have role assignments (Key Vaults Secret User) in the key vault
+const keyVaultName = process.env.KEY_VAULT_NAME;
+const url = `https://${keyVaultName}.vault.azure.net`;
+const credential = new ClientSecretCredential(
+  process.env.AZURE_TENANT_ID,
+  process.env.AZURE_CLIENT_ID,
+  process.env.AZURE_CLIENT_SECRET
+);
+const client = new SecretClient(url, credential);
+
+// Provide secret name as query param stored in Azure Key Vault
+app.get("/api/get-secret", async (req, res) => {
+  const secretName = req.query.name; // Example: ?name=my-secret
+  try {
+    const secret = await client.getSecret(secretName);
+    res.json({ value: secret.value });
+  } catch (error) {
+    console.error("Error retrieving secret:", error);
+    res.status(500).send("Error retrieving secret");
+  }
+});
 
 app.get("/api/articles/:name", async (req, res) => {
   const { name } = req.params;
