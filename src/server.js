@@ -1,13 +1,14 @@
+import fs from "fs";
+import admin from "firebase-admin";
 import express from "express";
 import { db, connectToDb } from "./db.js";
 import { ClientSecretCredential } from "@azure/identity";
 import { SecretClient } from "@azure/keyvault-secrets";
 import dotenv from "dotenv";
-
 dotenv.config();
-const app = express();
-// parse request body to json
-app.use(express.json());
+
+const credentials = JSON.parse(fs.readFileSync("./credentials.json")); // get credentials from firebase admin service accounts
+admin.initializeApp({ credential: admin.credential.cert(credentials) });
 
 // Provide Tenant ID, Client ID and Client Secret of the Registered Application in Azure (Service Principal)
 // Make sure that the Registered Application have role assignments (Key Vaults Secret User) in the key vault
@@ -21,11 +22,30 @@ const credential = new ClientSecretCredential(
 );
 const client = new SecretClient(url, credential);
 
+const app = express();
+// parse request body to json
+app.use(express.json());
+
+// next is a function that we call (ex: next will process get requests below) when we're done with our middleware
+app.use(async (req, res, next) => {
+  const { authtoken } = req.headers;
+  if (authtoken) {
+    try {
+      req.user = await admin.auth().verifyIdToken(authtoken);
+    } catch (e) {
+      return res.sendStatus(400);
+    }
+  }
+  req.user = req.user || {};
+  next();
+});
+
 // Provide secret name as query param stored in Azure Key Vault
 app.get("/api/get-secret", async (req, res) => {
   const secretName = req.query.name; // Example: ?name=my-secret
   try {
-    const secret = await client.getSecret(secretName);
+    //const secret = await client.getSecret(secretName); // akv access currently forbidden ; subscription expired
+    const secret = { value: process.env.FIREBASE_API_KEY };
     res.json({ value: secret.value });
   } catch (error) {
     console.error("Error retrieving secret:", error);
@@ -35,25 +55,48 @@ app.get("/api/get-secret", async (req, res) => {
 
 app.get("/api/articles/:name", async (req, res) => {
   const { name } = req.params;
+  const { uid } = req.user;
 
   const article = await db.collection("articles").findOne({ name });
 
   if (article) {
+    const upvoteIds = article.upvoteIds || [];
+    article.canUpvote = uid && !upvoteIds.includes(uid);
     res.json(article);
   } else {
     res.sendStatus(404);
   }
 });
 
+// Middleware to check if user is authenticated for upvoting and commenting (see requests below)
+app.use((req, res, next) => {
+  if (req.user) {
+    next();
+  } else {
+    res.sendStatus(401);
+  }
+});
+
 app.put("/api/articles/:name/upvote", async (req, res) => {
   const { name } = req.params;
-
-  await db.collection("articles").updateOne({ name }, { $inc: { upvotes: 1 } }); // $inc - increment a value , $set - set a value
+  const { uid } = req.user;
 
   const article = await db.collection("articles").findOne({ name });
+
   if (article) {
-    //res.send(`The ${name} article now has ${article.upvotes} upvotes`);
-    res.json(article);
+    const upvoteIds = article.upvoteIds || [];
+    const canUpvote = uid && !upvoteIds.includes(uid);
+    if (canUpvote) {
+      await db.collection("articles").updateOne(
+        { name },
+        {
+          $inc: { upvotes: 1 },
+          $push: { upvoteIds: uid },
+        }
+      ); // $inc - increment a value , $set - set a value, $push - push a value to an array
+    }
+    const updatedArticle = await db.collection("articles").findOne({ name });
+    res.json(updatedArticle);
   } else {
     res.send("That article doesn't exist");
   }
@@ -61,12 +104,13 @@ app.put("/api/articles/:name/upvote", async (req, res) => {
 
 app.post("/api/articles/:name/comments", async (req, res) => {
   const { name } = req.params;
-  const { postedBy, text } = req.body;
+  const { text } = req.body;
+  const { email } = req.user;
 
   await db.collection("articles").updateOne(
     { name },
     {
-      $push: { comments: { postedBy, text } },
+      $push: { comments: { postedBy: email, text } },
     }
   );
 
